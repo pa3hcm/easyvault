@@ -1,0 +1,5 @@
+VAULT_URL=https://vault.mydomain.com/
+VAULT_IMAGE=hashicorp/vault:latest
+MOUNT=kv
+DATAPATH=ca-certs
+SECRETSPATH=ca-secrets

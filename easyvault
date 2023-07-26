@@ -1,0 +1,135 @@
+#!/bin/bash
+
+# Configuration
+if [[ -r ./.easyvaultrc ]]
+then
+  source ./.easyvaultrc
+else
+  echo 'ERROR - No .easyvaultrc file found'
+  exit 1
+fi
+
+# Check if all required variables are configured
+for VARNAME in VAULT_URL VAULT_IMAGE MOUNT DATAPATH SECRETSPATH ; do
+  if [[ -z "${!VARNAME}" ]] ; then
+    echo "Variable $VARNAME not set"
+    exit 1
+  fi
+done
+
+# Set proper permissions on certificates, keys and csr's
+sudo chmod 0660 pki/issued/*
+sudo chmod 0660 pki/private/*
+sudo chmod 0660 pki/reqs/*
+
+VAULT_CMD="docker run -t --rm --entrypoint="" -e "VAULT_TOKEN=${VAULT_TOKEN}" -e "VAULT_CLI_NO_COLOR=1" ${VAULT_IMAGE} /bin/vault"
+KV_OPTS="-address=${VAULT_URL} -tls-skip-verify"
+
+# Get passphrases from Vault
+function vault_getsecrets {
+  CA_KEY_PW="$(${VAULT_CMD} kv get ${KV_OPTS} -mount=${MOUNT} -field=ca_key_passphrase ${SECRETSPATH} | sed 's/\r//g')"
+  CERT_KEY_PW="$(${VAULT_CMD} kv get ${KV_OPTS} -mount=${MOUNT} -field=cert_key_passphrase ${SECRETSPATH} | sed 's/\r//g')"
+}
+
+# Lists all certificates stored in Vault, reads every key/certificate, verifies this and restores it into the pki tree.
+function vault_load {
+  echo "Loading PKI keys/certificates from HashiCorp Vault..."
+  vault_getsecrets
+  for CERTNAME in $(${VAULT_CMD} kv list -address=${VAULT_URL} -tls-skip-verify ${MOUNT}/${DATAPATH} | tail -n +3) ; do
+    CERTNAME=$(echo ${CERTNAME} | sed 's/\r//')
+    echo -n "- ${CERTNAME}: "
+    CERTDATA="$(${VAULT_CMD} kv get ${KV_OPTS} -mount=${MOUNT} -field=certificate ${DATAPATH}/${CERTNAME} | sed 's/\r//g')"
+    KEYDATA=$(${VAULT_CMD} kv get ${KV_OPTS} -mount=${MOUNT} -field=key ${DATAPATH}/${CERTNAME} | sed 's/\r//g')
+    if [[ $(echo ${CERTDATA} | base64 -d | wc -l) -gt 20 ]] ; then
+      echo ${CERTDATA} | base64 -d > _tmp.crt
+      echo ${KEYDATA} | base64 -d > _tmp.key
+      if [[ $(openssl x509 -in _tmp.crt -noout -modulus) == $(openssl rsa -in _tmp.key -noout -modulus -passin "pass:${CERT_KEY_PW}") ]] ; then
+	mv _tmp.crt pki/issued/${CERTNAME}.crt
+	mv _tmp.key pki/private/${CERTNAME}.key
+	chmod 0660 pki/issued/${CERTNAME}.crt pki/private/${CERTNAME}.key
+        echo "OK"
+      else
+        echo "ERROR - Key and certificate do not match"
+      fi
+    else
+      echo "ERROR - Does not seem to be a valid certificate"
+    fi
+  done
+}
+
+# Stores all certificates/keys to Vault
+function vault_save {
+  echo "Saving PKI to HashiCorp Vault..."
+  for CERT in $(ls -1 pki/issued/*crt) ; do
+    CERTNAME=$(basename ${CERT} | sed 's/\.crt$//')
+    echo "- ${CERTNAME}"
+    ${VAULT_CMD} kv put ${KV_OPTS} -mount=${MOUNT} ${DATAPATH}/${CERTNAME} certificate=$(cat pki/issued/${CERTNAME}.crt | base64 -w 0) key=$(cat pki/private/${CERTNAME}.key | base64 -w 0)
+  done
+}
+
+# Lists all certificates/keys stored in Vault
+function vault_list {
+  echo "Certificates/keys stored in HashiCorp Vault:"
+  for CERTNAME in $(${VAULT_CMD} kv list -address=${VAULT_URL} -tls-skip-verify ${MOUNT}/${DATAPATH} | tail -n +3) ; do
+    echo "- ${CERTNAME}"
+  done
+}
+
+# Reads default key passphrase from Vault
+function vault_getpass {
+  vault_getsecrets
+  echo -n "CA passphrase:          ${CA_KEY_PW}"
+  echo -n "Default key passphrase: ${CERT_KEY_PW}"
+}
+
+# Displays help text
+function syntax {
+  echo 'EasyVault - HashiCorp integration for EasyRSA - (c)2022-2023 FIOD CoDE'
+  echo ''
+  echo 'Syntax: easyvault list|load|save'
+  echo ''
+  echo 'list'
+  echo '  Lists all certificates stored in HashiCorp Vault'
+  echo ''
+  echo 'load'
+  echo '  Copies all certificates from HashiCorp Vault into the pki/ tree'
+  echo ''
+  echo 'save'
+  echo '  Copies all certificates from the pki/ tree into HashiCorp Vault'
+  echo ''
+  echo 'Configuration (retrieved from .easyvaultrc):'
+  echo "  HashiCorp Vault URL:    ${VAULT_URL}"
+  echo "  Vault KV2 mount:        ${MOUNT}"
+  echo "  Vault KV2 data path:    ${DATAPATH}"
+  echo "  Vault KV2 secrets path: ${SECRETSPATH}"
+  echo ''
+  if [[ "${VAULT_TOKEN}" == "" ]] ; then
+    echo 'WARNING: VAULT_TOKEN environment variable not set!'
+  echo ''
+  fi
+}
+
+# Vault token is required, so better check this first
+if [[ "${VAULT_TOKEN}" == "" ]] ; then
+  syntax
+  exit 99
+fi
+
+# Main routine
+case $1 in
+load)
+  vault_load
+  ;;
+save)
+  vault_save
+  ;;
+list)
+  vault_list
+  ;;
+getpass)
+  vault_getpass
+  ;;
+*)
+  syntax
+  ;;
+esac
