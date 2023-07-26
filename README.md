@@ -55,5 +55,5 @@ Easyvault. If not, see `http://www.gnu.org/licenses/`.
 
 ## Project information
 
-Author: Ernest Neijenhuis
-Code on Github: `https://github.com/pa3hcm/easyvault`
+* Author: Ernest Neijenhuis
+* Code on Github: `https://github.com/pa3hcm/easyvault`
